@@ -49,7 +49,7 @@ for i,v := range arr{}
 for i,_ := range arr{} 等价与 for i := range arr{}
 ```
 
-
+​	注：在for循环中使用匿名函数，并且匿名函数引用了for循环得到的下标或者值时，需要拷贝一份再传入匿名函数中，而不是直接将for循环中得到的下标或者值直接传入！！！！
 
 ### switch
 
