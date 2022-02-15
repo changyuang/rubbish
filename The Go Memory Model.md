@@ -132,3 +132,177 @@ func main() {
 ​	如果channel被缓冲（例如，c = make(chan int, 1)），那么程序将不能保证打印“hello, world”。 （它可能会打印空字符串、崩溃或做其他事情。）
 
 ​	容量为 C 的channel上的第 k 次接收发生在该channel的第 k+C 次发送完成之前。
+
+​	该规则将前面的规则推广到缓冲channel。它允许通过缓冲channel对计数信号量进行建模：通道中的item数量对应活跃使用的数量，channel的容量对应最大同时使用数量，发送item获取semaphore，接收item释放semaphore。这是限制并发的常用习语。
+
+​	该程序为工作列表中的每个条目启动一个 goroutine，但这些 goroutine 使用限制通道进行协调，以确保一次最多运行三个工作函数。
+
+```go
+var limit = make(chan int, 3)
+func main() {
+	for _, w := range work {
+		go func(w func()) {
+			limit <- 1
+			w()
+			<-limit
+		}(w)
+	}
+	select{}
+}
+```
+
+### Locks
+
+​	sync 包实现了两种锁数据类型，sync.Mutex 和sync.RWMutex。
+
+​	对于任何 sync.Mutex 或 sync.RWMutex 变量 l 和 n < m(表示次数)，l.Unlock() 的第n次调用 发生在 l.Lock() 的第m次调用返回之前。
+
+​	这个程序：
+
+```go
+var l sync.Mutex
+var a string
+
+func f() {
+	a = "hello, world"
+	l.Unlock()
+}
+func main() {
+	l.Lock()
+	go f()
+	l.Lock()
+	print(a)
+}
+```
+
+​	保证打印“hello,world”。 对 l.Unlock() 的第一次调用（在 f 中）发生在对 l.Lock() 的第二次调用（在 main 中）返回之前，第二次调用Lock发生在打印之前。
+
+### Once
+
+​	sync 包通过使用 Once 类型为存在多个 goroutine 的情况下提供了一种安全的初始化机制。 多个线程可以执行once.Do(f) 用于特定的 f，但只有一个会运行 f()，其他调用会阻塞，直到 f() 返回。
+
+​	从 once.Do(f) 对 f() 的单次调用发生（返回）在任何对 once.Do(f) 的调用返回之前。
+
+​	在这个程序中:
+
+```go
+var a string
+var once sync.Once
+func setup() {
+	a = "hello, world"
+}
+func doprint() {
+	once.Do(setup)
+	print(a)
+}
+func twoprint() {
+	go doprint()
+	go doprint()
+}
+```
+
+​	调用 twoprint 将只调用一次 setup 。 setup function将在打印调用之前完成。 结果将是“hello, world”将被打印两次。
+
+## Incorrect synchronization
+
+​	请注意，读取 r 可能会观察到与 r 同时发生的写入 w 写入的值。 即使发生这种情况，也并不意味着发生在 r 之后的读取会观察到发生在 w 之前的写入。
+
+​	在这个程序中：
+
+```go
+var a, b int
+
+func f() {
+	a = 1
+	b = 2
+}
+func g() {
+	print(b)
+	print(a)
+}
+func main() {
+	go f()
+	g()
+}
+```
+
+​	可能会发生 g 打印 2 然后 0。
+
+​	这一事实使一些常见的惯用语法无效。
+
+​	双重检查锁定是一种避免同步开销的尝试。 例如，twoprint 程序可能被错误地写为：
+
+```go
+var a string
+var done bool
+
+func setup() {
+  //一下两句可能会调换顺序
+	a = "hello, world"
+	done = true
+}
+
+func doprint() {
+	if !done {
+		once.Do(setup)
+	}
+	print(a)
+}
+
+func twoprint() {
+	go doprint()
+	go doprint()
+}
+```
+
+​	但不能保证，在 doprint 中，观察到对done的写入意味着观察到对 a 的写入。 这个版本可以（错误地）打印一个空字符串而不是“hello, world”。
+
+​	另一个不正确的习惯用法是忙于等待一个值，如：
+
+```go
+var a string
+var done bool
+
+func setup() {
+	a = "hello, world"
+	done = true
+}
+
+func main() {
+	go setup()
+	for !done {
+	}
+	print(a)
+}
+```
+
+​	同上，不能保证，在 main 中，观察到对done的写入意味着观察到对 a 的写入，所以这个程序也可能打印出一个空字符串。
+
+​	更糟糕的是，无法保证 main 会观察到对 done 的写入，因为两个线程之间没有同步事件。main 中的循环不能保证完成。
+
+​	这个主题有更微妙的变体，比如这个程序。
+
+```go
+type T struct {
+	msg string
+}
+
+var g *T
+
+func setup() {
+	t := new(T)
+	t.msg = "hello, world"
+	g = t
+}
+
+func main() {
+	go setup()
+	for g == nil {
+	}
+	print(g.msg)
+}
+```
+
+​	即使 main 观察到 g != nil 并退出它的循环，也不能保证它会观察到 g.msg 的初始化值。
+
+​	在所有这些示例中，解决方案都是相同的：使用显式同步。
